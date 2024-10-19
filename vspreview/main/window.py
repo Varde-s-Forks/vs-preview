@@ -421,6 +421,11 @@ class MainWindow(AbstractQItem, QMainWindow, QAbstractYAMLObjectSingleton):
 
             if not self.storage_not_found:
                 self.load_storage()
+
+            self.toolbars.scening.export_template_lineedit.setText(
+                self.toolbars.scening.settings.default_export_template
+            )
+
         except Exception as e:
             load_error = e
 
