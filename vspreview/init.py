@@ -31,16 +31,16 @@ from .plugins.install import (
 __all__ = ["main"]
 
 
-def get_resolved_script(
-    filepath: Path,
-) -> tuple[ResolvedScript, FileResolverPlugin | None] | int:
+def get_resolved_script(filepath: Path,  no_exit: bool) -> tuple[ResolvedScript, FileResolverPlugin | None]:
     for plugin in get_installed_plugins(FileResolverPlugin, False).values():
         if plugin.can_run_file(filepath):
             return plugin.resolve_path(filepath), plugin
 
     if not filepath.exists():
+        from .utils import exit_func
+
         logging.error("Script or file path is invalid.")
-        return 1
+        exit_func(1, no_exit)
 
     return ResolvedScript(filepath, str(filepath)), None
 
@@ -48,54 +48,44 @@ def get_resolved_script(
 def main(_args: Sequence[str] | None = None, no_exit: bool = False) -> int:
     from .utils import exit_func
 
+    if _args is None:
+        _args = sys.argv[1:]
+
     parser = ArgumentParser(prog="VSPreview")
-    parser.add_argument(
-        "script_path_or_command",
-        type=str,
-        nargs="?",
-        help=f'Path to Vapoursynth script, video file(s) or plugins command {", ".join(plugins_commands)}',
-    )
-    parser.add_argument(
-        "plugins",
-        type=str,
-        nargs="*",
-        help=f'Plugins to {"/".join(plugins_commands[:-1])} or arguments to pass to the script environment.',
-    )
+
+    # If the first arg is NOT a command, then script_path is expected
+    if _args and _args[0] not in plugins_commands:
+        parser.add_argument(
+            "script_path",
+            type=str,
+            help="Path to Vapoursynth script or video file(s)",
+        )
+
+    # Global options
     parser.add_argument("--version", "-v", action="version", version="%(prog)s " + __version__)
-    parser.add_argument(
-        "--preserve-cwd",
-        "-c",
-        action="store_true",
-        help="do not chdir to script parent directory",
-    )
-    parser.add_argument(
-        "-f", "--frame", type=int, help="Frame to load initially (defaults to 0)"
-    )
-    parser.add_argument(
-        "--vscode-setup",
-        type=str,
-        choices=["override", "append", "ignore"],
-        nargs="?",
-        const="append",
-        help="Installs launch settings in cwd's .vscode",
-    )
-    parser.add_argument(
-        "--verbose", help="Set the logging to verbose.", action="store_true"
-    )
-    parser.add_argument(
-        "--force",
-        help="Force the install of a plugin even if it exists already.",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--no-deps", help="Ignore downloading dependencies.", action="store_true"
-    )
-    parser.add_argument(
-        "--force-storage",
-        help="Force override or local/global storage.",
-        action="store_true",
-        default=False,
-    )
+    parser.add_argument("--preserve-cwd", "-c", action="store_true", help="Do not chdir to script parent directory")
+    parser.add_argument("-f", "--frame", type=int, help="Frame to load initially (defaults to 0)")
+    parser.add_argument("--vscode-setup", type=str, choices=["override", "append", "ignore"], nargs="?", const="append",
+                        help="Installs launch settings in cwd's .vscode")
+    parser.add_argument("--verbose", action="store_true", help="Set the logging to verbose.")
+    parser.add_argument("--force", action="store_true", help="Force the install of a plugin even if it exists already.")
+    parser.add_argument("--no-deps", action="store_true", help="Ignore downloading dependencies.")
+    parser.add_argument("--force-storage", action="store_true", default=False, help="Force override or local/global storage.")
+
+    # Subcommands
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    parser_add = subparsers.add_parser("install", help="Install new plugin(s).")
+    parser_add.add_argument("plugins", nargs="*", help="List of the plugins to add.")
+
+    parser_remove = subparsers.add_parser("uninstall", help="Uninstall existing plugin(s).")
+    parser_remove.add_argument("plugins", nargs="*", help="List of the plugins to remove.")
+
+    parser_update = subparsers.add_parser("update", help="Update existing plugin(s).")
+    parser_update.add_argument("plugins", nargs="*", help="List of the plugins to update.")
+
+    parser_available = subparsers.add_parser("available", help="Show available plugins.")
+    parser_available.add_argument("plugins", nargs="*", help="List of the plugins available.")
 
     args = parser.parse_args(_args)
 
@@ -116,54 +106,31 @@ def main(_args: Sequence[str] | None = None, no_exit: bool = False) -> int:
 
         return exit_func(0, no_exit)
 
-    script_path_or_command = args.script_path_or_command
-
-    if not script_path_or_command and not (
-        args.plugins and (script_path_or_command := next(iter(args.plugins)))
-    ):
-        logging.error("Script/Video path required.")
-        return exit_func(1, no_exit)
-
-    if script_path_or_command.startswith("--") and args.plugins:
-        script_path_or_command = args.plugins.pop()
-        args.plugins = [args.script_path_or_command, *args.plugins]
-
-    if (command := script_path_or_command) in plugins_commands:
-        if command == "available":
+    if args.command in plugins_commands:
+        if args.command == "available":
             print_available_plugins()
-            return exit_func(0, no_exit)
-
-        if not args.plugins:
-            logging.error("You must provide at least one plugin!")
-            return exit_func(1, no_exit)
-
-        set_log_level(logging.INFO)
-
-        plugins = list(args.plugins)
-
-        if command == "install":
-            install_plugins(plugins, args.force, args.no_deps)
-        elif command == "uninstall":
-            uninstall_plugins(plugins)
-        elif command == "update":
-            uninstall_plugins(plugins, True)
-            install_plugins(plugins, True, args.no_deps)
-
+        elif args.command == "install":
+            install_plugins(args.plugins, args.force, args.no_deps)
+        elif args.command == "uninstall":
+            uninstall_plugins(args.plugins)
+        elif args.command == "update":
+            uninstall_plugins(args.plugins, True)
+            install_plugins(args.plugins, True, args.no_deps)
         return exit_func(0, no_exit)
 
-    script_or_err = get_resolved_script(Path(script_path_or_command).resolve())
+    if not getattr(args, "script_path", None):
+        logging.error("Script/Video path required.")
+        parser.print_help()
+        return exit_func(1, no_exit)
 
-    if isinstance(script_or_err, int):
-        return exit_func(script_or_err, no_exit)
-
-    script, file_resolve_plugin = script_or_err
+    script, file_resolve_plugin = get_resolved_script(Path(args.script_path).resolve(), no_exit)
 
     if (
         file_resolve_plugin
         and hasattr(file_resolve_plugin, "_config")
         and file_resolve_plugin._config.namespace == "dev.setsugen.vssource_load"
     ):
-        setattr(args, "preserve_cwd", True)
+        args.preserve_cwd = True
 
     if not args.preserve_cwd:
         os.chdir(script.path.parent)
@@ -197,14 +164,14 @@ def main(_args: Sequence[str] | None = None, no_exit: bool = False) -> int:
 
         return k.strip("--"), v
 
-    if args.plugins:
-        if file_resolve_plugin._config.namespace == "dev.setsugen.vssource_load":
-            additional_files = list[Path](
-                Path(filepath).resolve() for filepath in args.plugins
-            )
-            arguments.update(additional_files=additional_files)
-        else:
-            arguments |= {k: v for k, v in map(_parse_arg, args.plugins)}
+    # if args.plugins:
+    #     if file_resolve_plugin._config.namespace == "dev.setsugen.vssource_load":
+    #         additional_files = list[Path](
+    #             Path(filepath).resolve() for filepath in args.plugins
+    #         )
+    #         arguments.update(additional_files=additional_files)
+    #     else:
+    #         arguments |= {k: v for k, v in map(_parse_arg, args.plugins)}
 
     main.main_window = MainWindow(
         Path(os.getcwd()) if args.preserve_cwd else script.path.parent,
